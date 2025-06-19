@@ -1,8 +1,14 @@
-# Importa todas as ferramentas necessárias
+# --- Correção para o ChromaDB no Streamlit Cloud ---
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+# --- Fim da Correção ---
+
+# O resto do seu código começa aqui...
 import pandas as pd
 import google.generativeai as genai
 import chromadb
-import streamlit as st # Importa o Streamlit
+import streamlit as st
 import time
 import os
 
@@ -21,31 +27,28 @@ st.caption("Faça perguntas sobre os produtos da nossa base de dados.")
 # --- PARTE 2: CARREGAMENTO DOS DADOS E SEGURANÇA DA CHAVE (IMPORTANTE!) ---
 
 # Pede para o usuário inserir a chave de API de forma segura
-# Isso evita deixar a chave exposta no código
 try:
     # Tenta obter a chave dos segredos do Streamlit (para quando estiver online)
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except (KeyError, FileNotFoundError):
-    # Se não encontrar, pede para o usuário no app
-    GOOGLE_API_KEY = st.text_input("Digite sua Chave de API do Google AI Studio:", type="password")
+    st.error("ERRO: Chave de API não encontrada nos 'Secrets' do Streamlit. Por favor, configure-a no painel de deploy.")
+    st.stop()
 
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
 else:
-    st.warning("Por favor, insira sua chave de API para continuar.")
-    st.stop() # Interrompe a execução se a chave não for fornecida
+    st.warning("Chave de API configurada, mas vazia.")
+    st.stop()
 
 # --- PARTE 3: PROCESSAMENTO DA BASE DE DADOS (SÓ EXECUTA UMA VEZ) ---
 
-# Usamos @st.cache_resource para garantir que esta parte rode apenas uma vez,
-# mesmo que o usuário interaja com a página. Isso economiza tempo e processamento.
 @st.cache_resource
 def carregar_dados():
     EXCEL_FILE_PATH = 'minha_base.xlsx'
     COLLECTION_NAME = "produtos_collection"
     
     if not os.path.exists(EXCEL_FILE_PATH):
-        st.error(f"ERRO: O arquivo '{EXCEL_FILE_PATH}' não foi encontrado.")
+        st.error(f"ERRO: O arquivo de dados '{EXCEL_FILE_PATH}' não foi encontrado no repositório.")
         st.stop()
         
     df = pd.read_excel(EXCEL_FILE_PATH)
@@ -56,9 +59,8 @@ def carregar_dados():
             texto_linha += f"{coluna} é {valor}; "
         documentos.append(texto_linha)
 
-    client = chromadb.Client() # Cliente em memória para simplificar
+    client = chromadb.Client()
     
-    # Deleta a coleção se ela já existir para garantir dados atualizados
     if len(client.list_collections()) > 0 and COLLECTION_NAME in [c.name for c in client.list_collections()]:
         client.delete_collection(name=COLLECTION_NAME)
 
@@ -73,18 +75,17 @@ def carregar_dados():
         documents=documentos
     )
     
-    # Esta mensagem agora aparecerá na interface web, não no terminal
-    st.success("Base de dados carregada e processada com sucesso!")
     return collection
 
 # Carrega a coleção (o "cérebro" do bot)
-collection = carregar_dados()
+with st.spinner("Analisando a base de dados... Por favor, aguarde."):
+    collection = carregar_dados()
 
 # --- PARTE 4: LÓGICA DO CHATBOT COM MEMÓRIA ---
 
 # Inicializa o histórico da conversa na sessão
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state.messages = [{"role": "assistant", "content": "Olá! Como posso ajudar com os nossos produtos hoje?"}]
 
 # Exibe as mensagens do histórico
 for message in st.session_state.messages:
@@ -93,43 +94,37 @@ for message in st.session_state.messages:
 
 # Captura a pergunta do usuário
 if prompt := st.chat_input("Qual sua dúvida?"):
-    # Adiciona a pergunta do usuário ao histórico
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Monta o prompt para o Gemini com o histórico da conversa
-    model_generative = genai.GenerativeModel('gemini-1.5-flash')
-    
-    # Busca no ChromaDB por contexto relevante
-    embedding_prompt = genai.embed_content(model='models/text-embedding-004', content=prompt)['embedding']
-    resultados = collection.query(query_embeddings=[embedding_prompt], n_results=5)
-    contexto = "\n".join(resultados['documents'][0])
-    
-    # Constrói um histórico formatado para o modelo
-    historico_formatado = "\n".join([f'{m["role"]}: {m["content"]}' for m in st.session_state.messages])
-    
-    prompt_final = f"""
-    Você é um assistente de vendas e deve responder com base no CONTEXTO e no HISTÓRICO da conversa.
-
-    CONTEXTO:
-    {contexto}
-
-    HISTÓRICO DA CONVERSA:
-    {historico_formatado}
-
-    PERGUNTA ATUAL do usuário:
-    {prompt}
-    
-    Com base em tudo isso, forneça uma resposta útil e concisa:
-    """
-    
-    # Gera e exibe a resposta do bot
     with st.chat_message("assistant"):
         with st.spinner("Pensando..."):
+            model_generative = genai.GenerativeModel('gemini-1.5-flash')
+            
+            embedding_prompt = genai.embed_content(model='models/text-embedding-004', content=prompt)['embedding']
+            resultados = collection.query(query_embeddings=[embedding_prompt], n_results=5)
+            contexto = "\n".join(resultados['documents'][0])
+            
+            historico_formatado = "\n".join([f'{m["role"]}: {m["content"]}' for m in st.session_state.messages])
+            
+            prompt_final = f"""
+            Você é um assistente de vendas e deve responder com base no CONTEXTO e no HISTÓRICO da conversa.
+
+            CONTEXTO:
+            {contexto}
+
+            HISTÓRICO DA CONVERSA:
+            {historico_formatado}
+
+            PERGUNTA ATUAL do usuário:
+            {prompt}
+            
+            Com base em tudo isso, forneça uma resposta útil e concisa:
+            """
+            
             response = model_generative.generate_content(prompt_final)
             resposta = response.text
             st.markdown(resposta)
     
-    # Adiciona a resposta do bot ao histórico
     st.session_state.messages.append({"role": "assistant", "content": resposta})
