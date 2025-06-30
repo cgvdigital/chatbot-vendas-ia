@@ -5,3 +5,4 @@ google-generativeai
 chromadb
 pysqlite3-binary
 google-auth-oauthlib
+gspread
